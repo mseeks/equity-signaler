@@ -1,0 +1,15 @@
+version: '3'
+services:
+  signaler:
+    build: ./
+    env_file: .env
+    links:
+      - redis
+      - kafka
+  redis:
+    image: redis
+  kafka:
+      image: spotify/kafka
+      environment:
+        - ADVERTISED_PORT=9092
+        - ADVERTISED_HOST=kafka
