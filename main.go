@@ -127,6 +127,7 @@ func (equity *equity) hasChanged(signal string) (bool, error) {
 		Password: "",
 		DB:       0,
 	})
+	defer client.Close()
 
 	// Check if there's an existing value in Redis
 	existingValue, err := client.Get(equity.symbol).Result()
@@ -160,6 +161,7 @@ func (equity *equity) broadcastSignal(signal string) {
 		Topic:    os.Getenv("KAFKA_TOPIC"),
 		Balancer: &kafka.LeastBytes{},
 	})
+	defer producer.Close()
 
 	signalMessage := message{
 		Signal: signal,
@@ -177,8 +179,6 @@ func (equity *equity) broadcastSignal(signal string) {
 			Value: jsonMessage,
 		},
 	)
-
-	producer.Close()
 
 	jsonMessageString := string(jsonMessage)
 	fmt.Println(equity.symbol, "->", jsonMessageString)
