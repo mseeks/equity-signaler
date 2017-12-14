@@ -123,7 +123,7 @@ func (equity *equity) signal() (string, error) {
 func (equity *equity) hasChanged(signal string) (bool, error) {
 	// Create the Redis client
 	client := redis.NewClient(&redis.Options{
-		Addr:     "redis:6379",
+		Addr:     os.Getenv("REDIS_ENDPOINT"),
 		Password: "",
 		DB:       0,
 	})
