@@ -8,14 +8,13 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/antonholmquist/jason"
 	"github.com/go-redis/redis"
+	"github.com/jasonlvhit/gocron"
 	"github.com/segmentio/kafka-go"
 	"gopkg.in/resty.v1"
-	"gopkg.in/robfig/cron.v2"
 )
 
 // Used to represent an equity that we're watching for signal changes
@@ -186,24 +185,26 @@ func (equity *equity) broadcastSignal(signal string) {
 }
 
 func watchEquity(symbol string) {
-	watchedEquity := equity{strings.ToUpper(symbol)}
+	go func() {
+		watchedEquity := equity{strings.ToUpper(symbol)}
 
-	// Fetch the signal for the equity
-	signal, err := watchedEquity.signal()
-	if err != nil {
-		fmt.Println("Error:", err)
-		return
-	}
+		// Fetch the signal for the equity
+		signal, err := watchedEquity.signal()
+		if err != nil {
+			fmt.Println("Error:", err)
+			return
+		}
 
-	hasChanged, err := watchedEquity.hasChanged(signal)
-	if err != nil {
-		fmt.Println("Error:", err)
-		return
-	}
+		hasChanged, err := watchedEquity.hasChanged(signal)
+		if err != nil {
+			fmt.Println("Error:", err)
+			return
+		}
 
-	if hasChanged {
-		watchedEquity.broadcastSignal(signal)
-	}
+		if hasChanged {
+			watchedEquity.broadcastSignal(signal)
+		}
+	}()
 }
 
 // Shuffles an array in place
@@ -219,11 +220,8 @@ func shuffle(vals []string) {
 
 // Entrypoint for the program
 func main() {
-	var wg sync.WaitGroup
-	wg.Add(1)
-
 	// Initialize a new scheduler
-	scheduler := cron.New()
+	scheduler := gocron.NewScheduler()
 
 	// Get a list of equities from the environment variable
 	equityEatchlist := strings.Split(os.Getenv("EQUITY_WATCHLIST"), ",")
@@ -235,11 +233,10 @@ func main() {
 	// For each equity in the watchlist schedule it to be watched every 5 minutes
 	for _, equitySymbol := range equityEatchlist {
 		time.Sleep(5 * time.Second)
-		scheduler.AddFunc("@every 5m", func() { watchEquity(equitySymbol) })
+		scheduler.Every(5).Seconds().Do(watchEquity, equitySymbol)
+		watchEquity(equitySymbol) // Watch the signal immediately rather than wait until next trigger
 	}
 
 	// Start the scheduler process
-	scheduler.Start()
-
-	wg.Wait() // Waits for the processes to end, which will never actually happen
+	<-scheduler.Start()
 }
