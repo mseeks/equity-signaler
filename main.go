@@ -233,7 +233,7 @@ func main() {
 	// For each equity in the watchlist schedule it to be watched every 5 minutes
 	for _, equitySymbol := range equityEatchlist {
 		time.Sleep(5 * time.Second)
-		scheduler.Every(5).Seconds().Do(watchEquity, equitySymbol)
+		scheduler.Every(5).Minutes().Do(watchEquity, equitySymbol)
 		watchEquity(equitySymbol) // Watch the signal immediately rather than wait until next trigger
 	}
 
