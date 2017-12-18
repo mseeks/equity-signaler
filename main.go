@@ -4,22 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"os"
+	"os/signal"
 	"strconv"
-	"strings"
+	"syscall"
 	"time"
 
-	"github.com/antonholmquist/jason"
+	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"github.com/go-redis/redis"
-	"github.com/jasonlvhit/gocron"
-	"github.com/segmentio/kafka-go"
-	"gopkg.in/resty.v1"
 )
 
 // Used to represent an equity that we're watching for signal changes
 type equity struct {
-	symbol string
+	macd       float64
+	macdSignal float64
+	symbol     string
+	signal     string
 }
 
 type message struct {
@@ -27,97 +27,35 @@ type message struct {
 	At     string `json:"at"`
 }
 
-func (equity *equity) query() ([]byte, error) {
-	resp, err := resty.R().
-		SetQueryParams(map[string]string{
-			"function":    "MACD",
-			"symbol":      equity.symbol,
-			"interval":    "daily",
-			"series_type": "close",
-			"apikey":      os.Getenv("ALPHAVANTAGE_API_KEY"),
-		}).
-		SetHeader("Accept", "application/json").
-		Get("https://www.alphavantage.co/query")
+// Returns a BUY or SELL signal for the equity
+func newEquity(symbol string, macd string, macdSignal string) (equity, error) {
+	macdFloat, err := strconv.ParseFloat(macd, 64)
 	if err != nil {
-		return []byte(""), err
+		return equity{}, err
 	}
 
-	if resp.StatusCode() != 200 {
-		return []byte(""), fmt.Errorf("Incorrect status code: %v", resp.Status())
+	macdSignalFloat, err := strconv.ParseFloat(macdSignal, 64)
+	if err != nil {
+		return equity{}, err
 	}
 
-	return resp.Body(), nil
+	equity := equity{
+		macd:       macdFloat,
+		macdSignal: macdSignalFloat,
+		signal:     "",
+		symbol:     symbol,
+	}
+
+	return equity, nil
 }
 
 // Returns a BUY or SELL signal for the equity
-func (equity *equity) signal() (string, error) {
-	query, err := equity.query()
-	if err != nil {
-		return "", err
-	}
-
-	value, err := jason.NewObjectFromBytes(query)
-	if err != nil {
-		return "", err
-	}
-
-	technicalAnalysis, err := value.GetObject("Technical Analysis: MACD")
-	if err != nil {
-		return "", err
-	}
-
-	var todayKeys []string
-	var yesterdayKeys []string
-
-	today := time.Now().UTC().Format("2006-01-02")
-	yesterday := time.Now().AddDate(0, 0, -1).UTC().Format("2006-01-02")
-
-	for key := range technicalAnalysis.Map() {
-		if strings.Contains(key, today) {
-			todayKeys = append(todayKeys, key)
-		}
-		if strings.Contains(key, yesterday) {
-			yesterdayKeys = append(yesterdayKeys, key)
-		}
-	}
-
-	key := ""
-
-	if len(todayKeys) > 0 {
-		key = todayKeys[0]
-	} else if len(todayKeys) == 0 && len(yesterdayKeys) > 0 {
-		key = yesterdayKeys[0]
-	}
-
-	macdString, err := value.GetString("Technical Analysis: MACD", key, "MACD")
-	if err != nil {
-		return "", err
-	}
-
-	macdSignalString, err := value.GetString("Technical Analysis: MACD", key, "MACD_Signal")
-	if err != nil {
-		return "", err
-	}
-
-	macd, err := strconv.ParseFloat(macdString, 64)
-	if err != nil {
-		return "", err
-	}
-
-	macdSignal, err := strconv.ParseFloat(macdSignalString, 64)
-	if err != nil {
-		return "", err
-	}
-
-	var signal string
-
-	if macd > macdSignal {
-		signal = "BUY"
+func (equity *equity) setSignal() {
+	if equity.macd > equity.macdSignal {
+		equity.signal = "BUY"
 	} else {
-		signal = "SELL"
+		equity.signal = "SELL"
 	}
-
-	return signal, nil
 }
 
 func (equity *equity) hasChanged(signal string) (bool, error) {
@@ -155,16 +93,16 @@ func (equity *equity) hasChanged(signal string) (bool, error) {
 	return false, nil
 }
 
-func (equity *equity) broadcastSignal(signal string) {
+func (equity *equity) broadcastSignal() {
 	producer := kafka.NewWriter(kafka.WriterConfig{
 		Brokers:  []string{os.Getenv("KAFKA_ENDPOINT")},
-		Topic:    os.Getenv("KAFKA_TOPIC"),
+		Topic:    os.Getenv("KAFKA_SIGNALS_TOPIC"),
 		Balancer: &kafka.LeastBytes{},
 	})
 	defer producer.Close()
 
 	signalMessage := message{
-		Signal: signal,
+		Signal: equity.signal,
 		At:     time.Now().UTC().Format("2006-01-02 15:04:05 -0700"),
 	}
 
@@ -184,59 +122,76 @@ func (equity *equity) broadcastSignal(signal string) {
 	fmt.Println(equity.symbol, "->", jsonMessageString)
 }
 
-func watchEquity(symbol string) {
-	go func() {
-		watchedEquity := equity{strings.ToUpper(symbol)}
-
-		// Fetch the signal for the equity
-		signal, err := watchedEquity.signal()
-		if err != nil {
-			fmt.Println("Error:", err)
-			return
-		}
-
-		hasChanged, err := watchedEquity.hasChanged(signal)
-		if err != nil {
-			fmt.Println("Error:", err)
-			return
-		}
-
-		if hasChanged {
-			watchedEquity.broadcastSignal(signal)
-		}
-	}()
-}
-
-// Shuffles an array in place
-func shuffle(vals []string) {
-	r := rand.New(rand.NewSource(time.Now().Unix()))
-	for len(vals) > 0 {
-		n := len(vals)
-		randIndex := r.Intn(n)
-		vals[n-1], vals[randIndex] = vals[randIndex], vals[n-1]
-		vals = vals[:n-1]
-	}
-}
-
 // Entrypoint for the program
 func main() {
-	// Initialize a new scheduler
-	scheduler := gocron.NewScheduler()
-
-	// Get a list of equities from the environment variable
-	equityEatchlist := strings.Split(os.Getenv("EQUITY_WATCHLIST"), ",")
-
-	// Shuffle watchlist so ENV order of equities isn't a weighted factor and it's more dependent on time-based priority
-	// This should only really matter if there's a case where to equities change direction during the same interval (unlikely)
-	shuffle(equityEatchlist)
-
-	// For each equity in the watchlist schedule it to be watched every 5 minutes
-	for _, equitySymbol := range equityEatchlist {
-		time.Sleep(5 * time.Second)
-		scheduler.Every(5).Seconds().Do(watchEquity, equitySymbol)
-		watchEquity(equitySymbol) // Watch the signal immediately rather than wait until next trigger
+	watchedEquity, err := newEquity(symbol, macd, macdSignal)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
 	}
 
-	// Start the scheduler process
-	<-scheduler.Start()
+	// Set the signal for the equity based on stats
+	watchedEquity.setSignal()
+
+	hasChanged, err := watchedEquity.hasChanged()
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+
+	if hasChanged {
+		watchedEquity.broadcastSignal()
+	}
+
+	sigchan := make(chan os.Signal, 1)
+	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
+
+	c, err := kafka.NewConsumer(&kafka.ConfigMap{
+		"bootstrap.servers":  os.Getenv("KAFKA_ENDPOINT"),
+		"group.id":           os.Getenv("KAFKA_GROUP_ID"),
+		"session.timeout.ms": 6000,
+		"default.topic.config": kafka.ConfigMap{
+			"auto.offset.reset":       "latest",
+			"auto.commit.interval.ms": 1000,
+		}})
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create consumer: %s\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Created Consumer %v\n", c)
+
+	err = c.SubscribeTopics(os.Getenv("KAFKA_MACD_TOPIC"), nil)
+
+	run := true
+
+	for run == true {
+		select {
+		case sig := <-sigchan:
+			fmt.Printf("Caught signal %v: terminating\n", sig)
+			run = false
+		default:
+			ev := c.Poll(100)
+			if ev == nil {
+				continue
+			}
+
+			switch e := ev.(type) {
+			case *kafka.Message:
+				fmt.Printf("%% Message on %s:\n%s\n%s\n",
+					e.TopicPartition, string(e.Value), string(e.Key))
+			case kafka.PartitionEOF:
+				fmt.Printf("%% Reached %v\n", e)
+			case kafka.Error:
+				fmt.Fprintf(os.Stderr, "%% Error: %v\n", e)
+				run = false
+			default:
+				fmt.Printf("Ignored %v\n", e)
+			}
+		}
+	}
+
+	fmt.Printf("Closing consumer\n")
+	c.Close()
 }

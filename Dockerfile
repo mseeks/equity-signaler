@@ -1,4 +1,5 @@
 FROM golang:1.8 as builder
+RUN apt install librdkafka-dev
 WORKDIR /go/src/github.com/msull92/equity-signaler
 RUN go get -d -v golang.org/x/net/html
 COPY main.go .
