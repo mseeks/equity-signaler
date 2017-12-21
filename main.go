@@ -230,10 +230,10 @@ func main() {
 	// This should only really matter if there's a case where to equities change direction during the same interval (unlikely)
 	shuffle(equityEatchlist)
 
-	// For each equity in the watchlist schedule it to be watched every 5 minutes
+	// For each equity in the watchlist schedule it to be watched every 15 minutes
 	for _, equitySymbol := range equityEatchlist {
 		time.Sleep(5 * time.Second)
-		scheduler.Every(5).Minutes().Do(watchEquity, equitySymbol)
+		scheduler.Every(15).Minutes().Do(watchEquity, equitySymbol)
 		watchEquity(equitySymbol) // Watch the signal immediately rather than wait until next trigger
 	}
 
