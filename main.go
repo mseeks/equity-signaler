@@ -76,7 +76,7 @@ func (equity *equity) signal() (string, error) {
 
 	technicalAnalysis, err := value.GetObject("Technical Analysis: MACD")
 	if err != nil {
-		if strings.Contains(err.Error(), "Please consider optimizing your API call frequency.") {
+		if strings.Contains(err.Error(), "API call frequency") {
 			return "", fmt.Errorf("External API has enforced rate limiting")
 		}
 		return "", err
@@ -150,6 +150,20 @@ func (equity *equity) hasChanged(signal string) (bool, error) {
 	})
 	defer client.Close()
 
+	// Short circuit if it's recently changed, this helps prevent duplicate signals
+	recentlyChanged, err := client.Get(fmt.Sprint(equity.symbol, "_recently_changed")).Result()
+	if err == redis.Nil {
+		recentlyChanged = "false"
+	} else if err != nil {
+		panic(err)
+	}
+
+	// If the signal recently changed, then skip the rest of the process until entry expires
+	if recentlyChanged == "true" {
+		fmt.Println("Short-circuit signaling process, signal was recently changed.")
+		return false, nil
+	}
+
 	// Check if there's an existing value in Redis
 	existingValue, err := client.Get(equity.symbol).Result()
 	if err == redis.Nil {
@@ -161,10 +175,16 @@ func (equity *equity) hasChanged(signal string) (bool, error) {
 	} else if err != nil {
 		panic(err)
 	} else {
-		// If the signal has changed direction
 		if existingValue != signal {
 			// Set to the new value
 			err := client.Set(equity.symbol, signal, 0).Err()
+			if err != nil {
+				panic(err)
+			}
+
+			// Set recently changed to twelve hours to allow a timeout so duplicate signals are reduced
+			// Twelve hours should make sure that we aren't producing more than one signal for any given trading day
+			err = client.Set(fmt.Sprint(equity.symbol, "_recently_changed"), "true", 12*time.Hour).Err()
 			if err != nil {
 				panic(err)
 			}
@@ -253,7 +273,7 @@ func main() {
 
 	// For each equity in the watchlist schedule it to be watched every 15 minutes
 	for _, equitySymbol := range equityEatchlist {
-		time.Sleep(5 * time.Second)
+		time.Sleep(10 * time.Second)
 		scheduler.Every(15).Minutes().Do(watchEquity, equitySymbol)
 		watchEquity(equitySymbol) // Watch the signal immediately rather than wait until next trigger
 	}
