@@ -93,7 +93,8 @@ func broadcastSignal(symbol string, signal string) {
 
 	jsonMessage, err := json.Marshal(signalMessage)
 	if err != nil {
-		panic(err)
+		fmt.Println(err)
+		return
 	}
 
 	producer.WriteMessages(context.Background(),
@@ -108,37 +109,35 @@ func broadcastSignal(symbol string, signal string) {
 }
 
 func signalEquity(symbol string, stats statsMessage) {
-	go func() {
-		var signal string
+	var signal string
 
-		macd, err := strconv.ParseFloat(stats.Macd, 64)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
+	macd, err := strconv.ParseFloat(stats.Macd, 64)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 
-		macdSignal, err := strconv.ParseFloat(stats.MacdSignal, 64)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
+	macdSignal, err := strconv.ParseFloat(stats.MacdSignal, 64)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 
-		if macd > macdSignal {
-			signal = "BUY"
-		} else {
-			signal = "SELL"
-		}
+	if macd > macdSignal {
+		signal = "BUY"
+	} else {
+		signal = "SELL"
+	}
 
-		hasChanged, err := hasChanged(symbol, signal)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
+	hasChanged, err := hasChanged(symbol, signal)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 
-		if hasChanged {
-			broadcastSignal(symbol, signal)
-		}
-	}()
+	if hasChanged {
+		broadcastSignal(symbol, signal)
+	}
 }
 
 // Entrypoint for the program
