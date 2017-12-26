@@ -6,10 +6,13 @@ services:
     links:
       - redis
       - kafka
+  tracker:
+    image: msull92/macd-tracker
+    env_file: tracker.env
   redis:
     image: redis
   kafka:
-      image: spotify/kafka
-      environment:
-        - ADVERTISED_PORT=9092
-        - ADVERTISED_HOST=kafka
+    image: spotify/kafka
+    environment:
+      - ADVERTISED_PORT=9092
+      - ADVERTISED_HOST=kafka

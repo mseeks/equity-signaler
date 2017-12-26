@@ -4,144 +4,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"os"
-	"sort"
 	"strconv"
-	"strings"
 	"time"
 
-	"github.com/antonholmquist/jason"
 	"github.com/go-redis/redis"
-	"github.com/jasonlvhit/gocron"
 	"github.com/segmentio/kafka-go"
-	"gopkg.in/resty.v1"
 )
-
-// Used to represent an equity that we're watching for signal changes
-type equity struct {
-	symbol string
-}
 
 type message struct {
 	Signal string `json:"signal"`
 	At     string `json:"at"`
 }
 
-type byDate []time.Time
-
-func (s byDate) Len() int {
-	return len(s)
-}
-func (s byDate) Swap(i, j int) {
-	s[i], s[j] = s[j], s[i]
-}
-func (s byDate) Less(i, j int) bool {
-	return s[i].Unix() < s[j].Unix()
+type statsMessage struct {
+	Macd       string `json:"macd"`
+	MacdSignal string `json:"macd_signal"`
+	At         string `json:"at"`
 }
 
-func (equity *equity) query() ([]byte, error) {
-	resp, err := resty.R().
-		SetQueryParams(map[string]string{
-			"function":    "MACD",
-			"symbol":      equity.symbol,
-			"interval":    "daily",
-			"series_type": "close",
-			"apikey":      os.Getenv("ALPHAVANTAGE_API_KEY"),
-		}).
-		SetHeader("Accept", "application/json").
-		Get("https://www.alphavantage.co/query")
-	if err != nil {
-		return []byte(""), err
-	}
-
-	if resp.StatusCode() != 200 {
-		return []byte(""), fmt.Errorf("Incorrect status code: %v", resp.Status())
-	}
-
-	return resp.Body(), nil
-}
-
-// Returns a BUY or SELL signal for the equity
-func (equity *equity) signal() (string, error) {
-	query, err := equity.query()
-	if err != nil {
-		return "", err
-	}
-
-	value, err := jason.NewObjectFromBytes(query)
-	if err != nil {
-		return "", err
-	}
-
-	technicalAnalysis, err := value.GetObject("Technical Analysis: MACD")
-	if err != nil {
-		if strings.Contains(err.Error(), "API call frequency") {
-			return "", fmt.Errorf("External API has enforced rate limiting")
-		}
-		return "", err
-	}
-
-	var days []time.Time
-	dateLayout := "2006-01-02"
-	dateAndTimeLayout := "2006-01-02 15:04:05"
-
-	for key := range technicalAnalysis.Map() {
-		day, e := time.Parse(dateLayout, key)
-		if e != nil {
-			day, e = time.Parse(dateAndTimeLayout, key)
-			if e != nil {
-				return "", err
-			}
-		}
-
-		days = append(days, day)
-	}
-
-	sort.Sort(byDate(days))
-
-	lastKey := days[len(days)-1]
-	keyShort := lastKey.Format(dateLayout)
-	keyLong := lastKey.Format(dateAndTimeLayout)
-
-	macdString, err := value.GetString("Technical Analysis: MACD", keyShort, "MACD")
-	if err != nil {
-		macdString, err = value.GetString("Technical Analysis: MACD", keyLong, "MACD")
-		if err != nil {
-			return "", err
-		}
-	}
-
-	macdSignalString, err := value.GetString("Technical Analysis: MACD", keyShort, "MACD_Signal")
-	if err != nil {
-		macdSignalString, err = value.GetString("Technical Analysis: MACD", keyLong, "MACD_Signal")
-		if err != nil {
-			return "", err
-		}
-	}
-
-	macd, err := strconv.ParseFloat(macdString, 64)
-	if err != nil {
-		return "", err
-	}
-
-	macdSignal, err := strconv.ParseFloat(macdSignalString, 64)
-	if err != nil {
-		return "", err
-	}
-
-	var signal string
-
-	if macd > macdSignal {
-		signal = "BUY"
-	} else {
-		signal = "SELL"
-	}
-
-	return signal, nil
-}
-
-func (equity *equity) hasChanged(signal string) (bool, error) {
+func hasChanged(symbol string, signal string) (bool, error) {
 	// Create the Redis client
 	client := redis.NewClient(&redis.Options{
 		Addr:     os.Getenv("REDIS_ENDPOINT"),
@@ -151,7 +33,7 @@ func (equity *equity) hasChanged(signal string) (bool, error) {
 	defer client.Close()
 
 	// Short circuit if it's recently changed, this helps prevent duplicate signals
-	recentlyChanged, err := client.Get(fmt.Sprint(equity.symbol, "_recently_changed")).Result()
+	recentlyChanged, err := client.Get(fmt.Sprint(symbol, "_recently_changed")).Result()
 	if err == redis.Nil {
 		recentlyChanged = "false"
 	} else if err != nil {
@@ -165,10 +47,10 @@ func (equity *equity) hasChanged(signal string) (bool, error) {
 	}
 
 	// Check if there's an existing value in Redis
-	existingValue, err := client.Get(equity.symbol).Result()
+	existingValue, err := client.Get(symbol).Result()
 	if err == redis.Nil {
 		// Set the value if it didn't exist already
-		setErr := client.Set(equity.symbol, signal, 0).Err()
+		setErr := client.Set(symbol, signal, 0).Err()
 		if setErr != nil {
 			panic(setErr)
 		}
@@ -177,14 +59,14 @@ func (equity *equity) hasChanged(signal string) (bool, error) {
 	} else {
 		if existingValue != signal {
 			// Set to the new value
-			err := client.Set(equity.symbol, signal, 0).Err()
+			err := client.Set(symbol, signal, 0).Err()
 			if err != nil {
 				panic(err)
 			}
 
 			// Set recently changed to twelve hours to allow a timeout so duplicate signals are reduced
 			// Twelve hours should make sure that we aren't producing more than one signal for any given trading day
-			err = client.Set(fmt.Sprint(equity.symbol, "_recently_changed"), "true", 12*time.Hour).Err()
+			err = client.Set(fmt.Sprint(symbol, "_recently_changed"), "true", 12*time.Hour).Err()
 			if err != nil {
 				panic(err)
 			}
@@ -196,10 +78,10 @@ func (equity *equity) hasChanged(signal string) (bool, error) {
 	return false, nil
 }
 
-func (equity *equity) broadcastSignal(signal string) {
+func broadcastSignal(symbol string, signal string) {
 	producer := kafka.NewWriter(kafka.WriterConfig{
 		Brokers:  []string{os.Getenv("KAFKA_ENDPOINT")},
-		Topic:    os.Getenv("KAFKA_TOPIC"),
+		Topic:    os.Getenv("KAFKA_PRODUCER_TOPIC"),
 		Balancer: &kafka.RoundRobin{},
 	})
 	defer producer.Close()
@@ -216,68 +98,98 @@ func (equity *equity) broadcastSignal(signal string) {
 
 	producer.WriteMessages(context.Background(),
 		kafka.Message{
-			Key:   []byte(equity.symbol),
+			Key:   []byte(symbol),
 			Value: jsonMessage,
 		},
 	)
 
 	jsonMessageString := string(jsonMessage)
-	fmt.Println(equity.symbol, "->", jsonMessageString)
+	fmt.Println("Sent:", symbol, "->", jsonMessageString)
 }
 
-func watchEquity(symbol string) {
+func signalEquity(symbol string, stats statsMessage) {
 	go func() {
-		watchedEquity := equity{strings.ToUpper(symbol)}
+		var signal string
 
-		// Fetch the signal for the equity
-		signal, err := watchedEquity.signal()
+		macd, err := strconv.ParseFloat(stats.Macd, 64)
 		if err != nil {
-			fmt.Println("Error:", err)
-			return
+			fmt.Println(err)
 		}
 
-		hasChanged, err := watchedEquity.hasChanged(signal)
+		macdSignal, err := strconv.ParseFloat(stats.MacdSignal, 64)
 		if err != nil {
-			fmt.Println("Error:", err)
-			return
+			fmt.Println(err)
+		}
+
+		if macd > macdSignal {
+			signal = "BUY"
+		} else {
+			signal = "SELL"
+		}
+
+		hasChanged, err := hasChanged(symbol, signal)
+		if err != nil {
+			fmt.Println(err)
 		}
 
 		if hasChanged {
-			watchedEquity.broadcastSignal(signal)
+			broadcastSignal(symbol, signal)
 		}
 	}()
 }
 
-// Shuffles an array in place
-func shuffle(vals []string) {
-	r := rand.New(rand.NewSource(time.Now().Unix()))
-	for len(vals) > 0 {
-		n := len(vals)
-		randIndex := r.Intn(n)
-		vals[n-1], vals[randIndex] = vals[randIndex], vals[n-1]
-		vals = vals[:n-1]
-	}
-}
-
 // Entrypoint for the program
 func main() {
-	// Initialize a new scheduler
-	scheduler := gocron.NewScheduler()
-
-	// Get a list of equities from the environment variable
-	equityEatchlist := strings.Split(os.Getenv("EQUITY_WATCHLIST"), ",")
-
-	// Shuffle watchlist so ENV order of equities isn't a weighted factor and it's more dependent on time-based priority
-	// This should only really matter if there's a case where to equities change direction during the same interval (unlikely)
-	shuffle(equityEatchlist)
-
-	// For each equity in the watchlist schedule it to be watched every 15 minutes
-	for _, equitySymbol := range equityEatchlist {
-		time.Sleep(10 * time.Second)
-		scheduler.Every(15).Minutes().Do(watchEquity, equitySymbol)
-		watchEquity(equitySymbol) // Watch the signal immediately rather than wait until next trigger
+	broker := os.Getenv("KAFKA_ENDPOINT")
+	topic := os.Getenv("KAFKA_CONSUMER_TOPIC")
+	partition, err := strconv.Atoi(os.Getenv("KAFKA_PARTITION"))
+	if err != nil {
+		panic(err)
 	}
 
-	// Start the scheduler process
-	<-scheduler.Start()
+	kafkaClientReader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:   []string{broker},
+		Topic:     topic,
+		Partition: partition,
+	})
+	defer kafkaClientReader.Close()
+
+	err = kafkaClientReader.SetOffset(-2) // -2 is how you say you want the last offset
+	if err != nil {
+		panic(err)
+	}
+
+	for {
+		message, err := kafkaClientReader.ReadMessage(context.Background())
+		if err != nil {
+			fmt.Println(err)
+		}
+
+		if message.Value != nil {
+			symbol := string(message.Key)
+			stats := statsMessage{}
+
+			fmt.Println("Received:", symbol, "->", string(message.Value))
+
+			err := json.Unmarshal(message.Value, &stats)
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+
+			sentAt, err := time.Parse("2006-01-02 15:04:05 -0700", stats.At)
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+
+			anHourAgo := time.Now().UTC().Add(-1 * time.Hour).Unix()
+
+			if sentAt.Unix() > anHourAgo {
+				signalEquity(symbol, stats)
+			} else {
+				fmt.Println("Message has expired, ignoring.")
+			}
+		}
+	}
 }
