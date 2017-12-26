@@ -114,11 +114,13 @@ func signalEquity(symbol string, stats statsMessage) {
 		macd, err := strconv.ParseFloat(stats.Macd, 64)
 		if err != nil {
 			fmt.Println(err)
+			return
 		}
 
 		macdSignal, err := strconv.ParseFloat(stats.MacdSignal, 64)
 		if err != nil {
 			fmt.Println(err)
+			return
 		}
 
 		if macd > macdSignal {
@@ -130,6 +132,7 @@ func signalEquity(symbol string, stats statsMessage) {
 		hasChanged, err := hasChanged(symbol, signal)
 		if err != nil {
 			fmt.Println(err)
+			return
 		}
 
 		if hasChanged {
