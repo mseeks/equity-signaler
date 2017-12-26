@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,18 @@ type equity struct {
 type message struct {
 	Signal string `json:"signal"`
 	At     string `json:"at"`
+}
+
+type byDate []time.Time
+
+func (s byDate) Len() int {
+	return len(s)
+}
+func (s byDate) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
+}
+func (s byDate) Less(i, j int) bool {
+	return s[i].Unix() < s[j].Unix()
 }
 
 func (equity *equity) query() ([]byte, error) {
@@ -63,40 +76,48 @@ func (equity *equity) signal() (string, error) {
 
 	technicalAnalysis, err := value.GetObject("Technical Analysis: MACD")
 	if err != nil {
+		if strings.Contains(err.Error(), "Please consider optimizing your API call frequency.") {
+			return "", fmt.Errorf("External API has enforced rate limiting")
+		}
 		return "", err
 	}
 
-	var todayKeys []string
-	var yesterdayKeys []string
-
-	today := time.Now().UTC().Format("2006-01-02")
-	yesterday := time.Now().AddDate(0, 0, -1).UTC().Format("2006-01-02")
+	var days []time.Time
+	dateLayout := "2006-01-02"
+	dateAndTimeLayout := "2006-01-02 15:04:05"
 
 	for key := range technicalAnalysis.Map() {
-		if strings.Contains(key, today) {
-			todayKeys = append(todayKeys, key)
+		day, e := time.Parse(dateLayout, key)
+		if e != nil {
+			day, e = time.Parse(dateAndTimeLayout, key)
+			if e != nil {
+				return "", err
+			}
 		}
-		if strings.Contains(key, yesterday) {
-			yesterdayKeys = append(yesterdayKeys, key)
+
+		days = append(days, day)
+	}
+
+	sort.Sort(byDate(days))
+
+	lastKey := days[len(days)-1]
+	keyShort := lastKey.Format(dateLayout)
+	keyLong := lastKey.Format(dateAndTimeLayout)
+
+	macdString, err := value.GetString("Technical Analysis: MACD", keyShort, "MACD")
+	if err != nil {
+		macdString, err = value.GetString("Technical Analysis: MACD", keyLong, "MACD")
+		if err != nil {
+			return "", err
 		}
 	}
 
-	key := ""
-
-	if len(todayKeys) > 0 {
-		key = todayKeys[0]
-	} else if len(todayKeys) == 0 && len(yesterdayKeys) > 0 {
-		key = yesterdayKeys[0]
-	}
-
-	macdString, err := value.GetString("Technical Analysis: MACD", key, "MACD")
+	macdSignalString, err := value.GetString("Technical Analysis: MACD", keyShort, "MACD_Signal")
 	if err != nil {
-		return "", err
-	}
-
-	macdSignalString, err := value.GetString("Technical Analysis: MACD", key, "MACD_Signal")
-	if err != nil {
-		return "", err
+		macdSignalString, err = value.GetString("Technical Analysis: MACD", keyLong, "MACD_Signal")
+		if err != nil {
+			return "", err
+		}
 	}
 
 	macd, err := strconv.ParseFloat(macdString, 64)
