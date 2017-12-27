@@ -165,33 +165,33 @@ func main() {
 		message, err := kafkaClientReader.ReadMessage(context.Background())
 		if err != nil {
 			fmt.Println(err)
+			continue
 		}
 
-		if message.Value != nil {
-			symbol := string(message.Key)
-			stats := statsMessage{}
+		symbol := string(message.Key)
+		stats := statsMessage{}
 
-			fmt.Println("Received:", symbol, "->", string(message.Value))
+		fmt.Println("Received:", symbol, "->", string(message.Value))
 
-			err := json.Unmarshal(message.Value, &stats)
-			if err != nil {
-				fmt.Println(err)
-				return
-			}
-
-			sentAt, err := time.Parse("2006-01-02 15:04:05 -0700", stats.At)
-			if err != nil {
-				fmt.Println(err)
-				return
-			}
-
-			anHourAgo := time.Now().UTC().Add(-1 * time.Hour).Unix()
-
-			if sentAt.Unix() > anHourAgo {
-				signalEquity(symbol, stats)
-			} else {
-				fmt.Println("Message has expired, ignoring.")
-			}
+		err = json.Unmarshal(message.Value, &stats)
+		if err != nil {
+			fmt.Println(err)
+			continue
 		}
+
+		sentAt, err := time.Parse("2006-01-02 15:04:05 -0700", stats.At)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+
+		anHourAgo := time.Now().UTC().Add(-1 * time.Hour).Unix()
+
+		if sentAt.Unix() < anHourAgo {
+			fmt.Println("Message has expired, ignoring.")
+			continue
+		}
+
+		signalEquity(symbol, stats)
 	}
 }
