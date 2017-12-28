@@ -99,15 +99,15 @@ func broadcastSignal(symbol string, signal string) {
 		return
 	}
 
+	jsonMessageString := string(jsonMessage)
+	fmt.Println("Sending:", symbol, "->", jsonMessageString)
+
 	msg := &sarama.ProducerMessage{Topic: topic, Value: sarama.StringEncoder(jsonMessage), Key: sarama.StringEncoder(symbol)}
 	_, _, err = producer.SendMessage(msg)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-
-	jsonMessageString := string(jsonMessage)
-	fmt.Println("Sent:", symbol, "->", jsonMessageString)
 }
 
 func signalEquity(symbol string, stats statsMessage) {
