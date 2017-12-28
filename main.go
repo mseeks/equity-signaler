@@ -1,15 +1,14 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
 	"time"
 
+	"github.com/Shopify/sarama"
 	"github.com/go-redis/redis"
-	"github.com/segmentio/kafka-go"
 )
 
 type message struct {
@@ -79,11 +78,14 @@ func hasChanged(symbol string, signal string) (bool, error) {
 }
 
 func broadcastSignal(symbol string, signal string) {
-	producer := kafka.NewWriter(kafka.WriterConfig{
-		Brokers:  []string{os.Getenv("KAFKA_ENDPOINT")},
-		Topic:    os.Getenv("KAFKA_PRODUCER_TOPIC"),
-		Balancer: &kafka.RoundRobin{},
-	})
+	broker := os.Getenv("KAFKA_ENDPOINT")
+	topic := os.Getenv("KAFKA_PRODUCER_TOPIC")
+
+	producer, err := sarama.NewSyncProducer([]string{broker}, nil)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 	defer producer.Close()
 
 	signalMessage := message{
@@ -97,12 +99,12 @@ func broadcastSignal(symbol string, signal string) {
 		return
 	}
 
-	producer.WriteMessages(context.Background(),
-		kafka.Message{
-			Key:   []byte(symbol),
-			Value: jsonMessage,
-		},
-	)
+	msg := &sarama.ProducerMessage{Topic: topic, Value: sarama.StringEncoder(jsonMessage), Key: sarama.StringEncoder(symbol)}
+	_, _, err = producer.SendMessage(msg)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 
 	jsonMessageString := string(jsonMessage)
 	fmt.Println("Sent:", symbol, "->", jsonMessageString)
@@ -144,55 +146,52 @@ func signalEquity(symbol string, stats statsMessage) {
 func main() {
 	broker := os.Getenv("KAFKA_ENDPOINT")
 	topic := os.Getenv("KAFKA_CONSUMER_TOPIC")
-	partition, err := strconv.Atoi(os.Getenv("KAFKA_PARTITION"))
-	if err != nil {
-		panic(err)
-	}
-
-	kafkaClientReader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:   []string{broker},
-		Topic:     topic,
-		Partition: partition,
-	})
-	defer kafkaClientReader.Close()
-
-	err = kafkaClientReader.SetOffset(-2) // -2 is how you say you want the last offset
-	if err != nil {
-		panic(err)
-	}
 
 	for {
-		message, err := kafkaClientReader.ReadMessage(context.Background())
+		consumer, err := sarama.NewConsumer([]string{broker}, nil)
 		if err != nil {
 			fmt.Println(err)
 			continue
 		}
+		defer consumer.Close()
 
-		symbol := string(message.Key)
-		stats := statsMessage{}
-
-		fmt.Println("Received:", symbol, "->", string(message.Value))
-
-		err = json.Unmarshal(message.Value, &stats)
+		partitionConsumer, err := consumer.ConsumePartition(topic, 0, sarama.OffsetNewest)
 		if err != nil {
 			fmt.Println(err)
 			continue
 		}
+		defer partitionConsumer.Close()
 
-		sentAt, err := time.Parse("2006-01-02 15:04:05 -0700", stats.At)
-		if err != nil {
-			fmt.Println(err)
-			continue
+		for {
+			select {
+			case message := <-partitionConsumer.Messages():
+				symbol := string(message.Key)
+				stats := statsMessage{}
+
+				fmt.Println("Received:", symbol, "->", string(message.Value))
+
+				err = json.Unmarshal(message.Value, &stats)
+				if err != nil {
+					fmt.Println(err)
+					continue
+				}
+
+				sentAt, err := time.Parse("2006-01-02 15:04:05 -0700", stats.At)
+				if err != nil {
+					fmt.Println(err)
+					continue
+				}
+
+				anHourAgo := time.Now().UTC().Add(-1 * time.Hour).Unix()
+
+				if sentAt.Unix() < anHourAgo {
+					fmt.Println("Message has expired, ignoring.")
+
+					continue
+				}
+
+				signalEquity(symbol, stats)
+			}
 		}
-
-		anHourAgo := time.Now().UTC().Add(-1 * time.Hour).Unix()
-
-		if sentAt.Unix() < anHourAgo {
-			fmt.Println("Message has expired, ignoring.")
-
-			continue
-		}
-
-		signalEquity(symbol, stats)
 	}
 }
