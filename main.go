@@ -49,7 +49,7 @@ func hasChanged(symbol string, signal string) (bool, error) {
 	existingValue, err := client.Get(fmt.Sprint(symbol, "_signal")).Result()
 	if err == redis.Nil {
 		// Set the value if it didn't exist already
-		setErr := client.Set(fmt.Sprint(symbol, "_signal"), signal, 1*time.Hour).Err()
+		setErr := client.Set(fmt.Sprint(symbol, "_signal"), signal, 0).Err()
 		if setErr != nil {
 			panic(setErr)
 		}
@@ -58,7 +58,7 @@ func hasChanged(symbol string, signal string) (bool, error) {
 	} else {
 		if existingValue != signal {
 			// Set to the new value
-			err := client.Set(fmt.Sprint(symbol, "_signal"), signal, 1*time.Hour).Err()
+			err := client.Set(fmt.Sprint(symbol, "_signal"), signal, 0).Err()
 			if err != nil {
 				panic(err)
 			}
