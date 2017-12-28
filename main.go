@@ -46,10 +46,10 @@ func hasChanged(symbol string, signal string) (bool, error) {
 	}
 
 	// Check if there's an existing value in Redis
-	existingValue, err := client.Get(symbol).Result()
+	existingValue, err := client.Get(fmt.Sprint(symbol, "_signal")).Result()
 	if err == redis.Nil {
 		// Set the value if it didn't exist already
-		setErr := client.Set(symbol, signal, 0).Err()
+		setErr := client.Set(fmt.Sprint(symbol, "_signal"), signal, 0).Err()
 		if setErr != nil {
 			panic(setErr)
 		}
@@ -58,7 +58,7 @@ func hasChanged(symbol string, signal string) (bool, error) {
 	} else {
 		if existingValue != signal {
 			// Set to the new value
-			err := client.Set(symbol, signal, 0).Err()
+			err := client.Set(fmt.Sprint(symbol, "_signal"), signal, 0).Err()
 			if err != nil {
 				panic(err)
 			}
