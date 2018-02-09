@@ -17,9 +17,10 @@ type message struct {
 }
 
 type statsMessage struct {
-	Macd       string `json:"macd"`
-	MacdSignal string `json:"macd_signal"`
-	At         string `json:"at"`
+	Macd              string `json:"macd"`
+	MacdSignal        string `json:"macd_signal"`
+	MacdDecayedSignal string `json:"macd_decayed_signal"`
+	At                string `json:"at"`
 }
 
 func hasChanged(symbol string, signal string) (bool, error) {
