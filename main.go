@@ -48,7 +48,7 @@ func hasChanged(symbol string, signal string) (bool, error) {
 	if err == redis.Nil {
 		recentlyChanged = "false"
 	} else if err != nil {
-		panic(err)
+		return false, err
 	}
 
 	// If the signal recently changed, then skip the rest of the process until entry expires
