@@ -43,18 +43,20 @@ func hasChanged(symbol string, signal string) (bool, error) {
 	})
 	defer redisClient.Close()
 
-	// Short circuit if it's recently changed, this helps prevent duplicate signals
-	recentlyChanged, err := redisClient.Get(fmt.Sprint(symbol, "_recently_changed")).Result()
-	if err == redis.Nil {
-		recentlyChanged = "false"
-	} else if err != nil {
-		return false, err
-	}
+	if os.Getenv("TEST_MODE") != "true" {
+		// Short circuit if it's recently changed, this helps prevent duplicate signals
+		recentlyChanged, err := redisClient.Get(fmt.Sprint(symbol, "_recently_changed")).Result()
+		if err == redis.Nil {
+			recentlyChanged = "false"
+		} else if err != nil {
+			return false, err
+		}
 
-	// If the signal recently changed, then skip the rest of the process until entry expires
-	if recentlyChanged == "true" {
-		fmt.Println("Short-circuit signaling process, signal was recently changed.")
-		return false, nil
+		// If the signal recently changed, then skip the rest of the process until entry expires
+		if recentlyChanged == "true" {
+			fmt.Println("Short-circuit signaling process, signal was recently changed.")
+			return false, nil
+		}
 	}
 
 	// Check if there's an existing value in Redis
@@ -89,10 +91,10 @@ func hasChanged(symbol string, signal string) (bool, error) {
 	return false, nil
 }
 
-func broadcastSignal(symbol string, signal string) {
+func broadcastSignal(symbol string, signal string, at string) {
 	signalMessage := message{
 		Signal: signal,
-		At:     time.Now().UTC().Format("2006-01-02 15:04:05 -0700"),
+		At:     at,
 	}
 
 	jsonMessage, err := json.Marshal(signalMessage)
@@ -139,7 +141,7 @@ func signalEquity(symbol string, stats statsMessage) {
 	}
 
 	if hasChanged {
-		broadcastSignal(symbol, signal)
+		broadcastSignal(symbol, signal, stats.At)
 	}
 }
 
