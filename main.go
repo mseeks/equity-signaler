@@ -3,12 +3,23 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"time"
 
 	"github.com/Shopify/sarama"
+	cluster "github.com/bsm/sarama-cluster"
 	"github.com/go-redis/redis"
+)
+
+var (
+	broker        string
+	consumer      *cluster.Consumer
+	consumerGroup string
+	consumerTopic string
+	producer      sarama.AsyncProducer
+	producerTopic string
 )
 
 type message struct {
@@ -25,15 +36,15 @@ type statsMessage struct {
 
 func hasChanged(symbol string, signal string) (bool, error) {
 	// Create the Redis client
-	client := redis.NewClient(&redis.Options{
+	redisClient := redis.NewClient(&redis.Options{
 		Addr:     os.Getenv("REDIS_ENDPOINT"),
 		Password: "",
 		DB:       0,
 	})
-	defer client.Close()
+	defer redisClient.Close()
 
 	// Short circuit if it's recently changed, this helps prevent duplicate signals
-	recentlyChanged, err := client.Get(fmt.Sprint(symbol, "_recently_changed")).Result()
+	recentlyChanged, err := redisClient.Get(fmt.Sprint(symbol, "_recently_changed")).Result()
 	if err == redis.Nil {
 		recentlyChanged = "false"
 	} else if err != nil {
@@ -47,10 +58,10 @@ func hasChanged(symbol string, signal string) (bool, error) {
 	}
 
 	// Check if there's an existing value in Redis
-	existingValue, err := client.Get(fmt.Sprint(symbol, "_signal")).Result()
+	existingValue, err := redisClient.Get(fmt.Sprint(symbol, "_signal")).Result()
 	if err == redis.Nil {
 		// Set the value if it didn't exist already
-		setErr := client.Set(fmt.Sprint(symbol, "_signal"), signal, 0).Err()
+		setErr := redisClient.Set(fmt.Sprint(symbol, "_signal"), signal, 0).Err()
 		if setErr != nil {
 			panic(setErr)
 		}
@@ -59,14 +70,14 @@ func hasChanged(symbol string, signal string) (bool, error) {
 	} else {
 		if existingValue != signal {
 			// Set to the new value
-			err := client.Set(fmt.Sprint(symbol, "_signal"), signal, 0).Err()
+			err := redisClient.Set(fmt.Sprint(symbol, "_signal"), signal, 0).Err()
 			if err != nil {
 				panic(err)
 			}
 
 			// Set recently changed to twelve hours to allow a timeout so duplicate signals are reduced
 			// Twelve hours should make sure that we aren't producing more than one signal for any given trading day
-			err = client.Set(fmt.Sprint(symbol, "_recently_changed"), "true", 12*time.Hour).Err()
+			err = redisClient.Set(fmt.Sprint(symbol, "_recently_changed"), "true", 12*time.Hour).Err()
 			if err != nil {
 				panic(err)
 			}
@@ -79,16 +90,6 @@ func hasChanged(symbol string, signal string) (bool, error) {
 }
 
 func broadcastSignal(symbol string, signal string) {
-	broker := os.Getenv("KAFKA_ENDPOINT")
-	topic := os.Getenv("KAFKA_PRODUCER_TOPIC")
-
-	producer, err := sarama.NewSyncProducer([]string{broker}, nil)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	defer producer.Close()
-
 	signalMessage := message{
 		Signal: signal,
 		At:     time.Now().UTC().Format("2006-01-02 15:04:05 -0700"),
@@ -103,11 +104,10 @@ func broadcastSignal(symbol string, signal string) {
 	jsonMessageString := string(jsonMessage)
 	fmt.Println("Sending:", symbol, "->", jsonMessageString)
 
-	msg := &sarama.ProducerMessage{Topic: topic, Value: sarama.StringEncoder(jsonMessage), Key: sarama.StringEncoder(symbol)}
-	_, _, err = producer.SendMessage(msg)
-	if err != nil {
-		fmt.Println(err)
-		return
+	producer.Input() <- &sarama.ProducerMessage{
+		Topic: producerTopic,
+		Key:   sarama.StringEncoder(symbol),
+		Value: sarama.StringEncoder(jsonMessage),
 	}
 }
 
@@ -145,53 +145,86 @@ func signalEquity(symbol string, stats statsMessage) {
 
 // Entrypoint for the program
 func main() {
-	broker := os.Getenv("KAFKA_ENDPOINT")
-	topic := os.Getenv("KAFKA_CONSUMER_TOPIC")
+	broker = os.Getenv("KAFKA_ENDPOINT")
+	consumerTopic = os.Getenv("KAFKA_CONSUMER_TOPIC")
+	consumerGroup = os.Getenv("KAFKA_CONSUMER_GROUP")
+	producerTopic = os.Getenv("KAFKA_PRODUCER_TOPIC")
+
+	// init config
+	consumerConfig := cluster.NewConfig()
+	producerConfig := sarama.NewConfig()
+
+	producerConfig.Producer.RequiredAcks = sarama.WaitForLocal       // Only wait for the leader to ack
+	producerConfig.Producer.Compression = sarama.CompressionSnappy   // Compress messages
+	producerConfig.Producer.Flush.Frequency = 500 * time.Millisecond // Flush batches every 500ms
+
+	// init consumer
+	brokers := []string{broker}
+	topics := []string{consumerTopic}
 
 	for {
-		consumer, err := sarama.NewConsumer([]string{broker}, nil)
+		var err error
+
+		consumer, err = cluster.NewConsumer(brokers, consumerGroup, topics, consumerConfig)
 		if err != nil {
 			fmt.Println(err)
 			continue
 		}
 		defer consumer.Close()
 
-		partitionConsumer, err := consumer.ConsumePartition(topic, 0, sarama.OffsetNewest)
+		producer, err = sarama.NewAsyncProducer(brokers, producerConfig)
 		if err != nil {
 			fmt.Println(err)
 			continue
 		}
-		defer partitionConsumer.Close()
+		defer producer.Close()
 
+		go func() {
+			for err := range consumer.Errors() {
+				log.Println("Error:", err)
+			}
+		}()
+
+		go func() {
+			for err := range producer.Errors() {
+				log.Println("Error:", err)
+			}
+		}()
+
+		// consume messages
 		for {
 			select {
-			case message := <-partitionConsumer.Messages():
-				symbol := string(message.Key)
-				stats := statsMessage{}
+			case msg, ok := <-consumer.Messages():
+				if ok {
+					symbol := string(msg.Key)
+					stats := statsMessage{}
 
-				fmt.Println("Received:", symbol, "->", string(message.Value))
+					fmt.Println("Received:", symbol, "->", string(msg.Value))
 
-				err = json.Unmarshal(message.Value, &stats)
-				if err != nil {
-					fmt.Println(err)
-					continue
+					err = json.Unmarshal(msg.Value, &stats)
+					if err != nil {
+						fmt.Println(err)
+						continue
+					}
+
+					sentAt, err := time.Parse("2006-01-02 15:04:05 -0700", stats.At)
+					if err != nil {
+						fmt.Println(err)
+						continue
+					}
+
+					anHourAgo := time.Now().UTC().Add(-1 * time.Hour).Unix()
+
+					if sentAt.Unix() < anHourAgo && os.Getenv("TEST_MODE") != "true" {
+						fmt.Println("Message has expired, ignoring.")
+
+						continue
+					}
+
+					signalEquity(symbol, stats)
+
+					consumer.MarkOffset(msg, "") // mark message as processed
 				}
-
-				sentAt, err := time.Parse("2006-01-02 15:04:05 -0700", stats.At)
-				if err != nil {
-					fmt.Println(err)
-					continue
-				}
-
-				anHourAgo := time.Now().UTC().Add(-1 * time.Hour).Unix()
-
-				if sentAt.Unix() < anHourAgo {
-					fmt.Println("Message has expired, ignoring.")
-
-					continue
-				}
-
-				signalEquity(symbol, stats)
 			}
 		}
 	}
